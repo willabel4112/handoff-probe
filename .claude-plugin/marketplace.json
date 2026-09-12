@@ -1,0 +1,14 @@
+{
+  "name": "willabel4112",
+  "owner": {
+    "name": "Will C. Abel"
+  },
+  "plugins": [
+    {
+      "name": "handoff-probe",
+      "source": "./",
+      "description": "Interview your handoff document with a fresh, ignorant agent before you leave."
+    }
+  ],
+  "description": "Tools from an operator running a small fleet of coding agents \u2014 handoffs, memory, audit."
+}

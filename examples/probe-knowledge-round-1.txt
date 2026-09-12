@@ -1,0 +1,10 @@
+SUMMARY:
+1. The nightly rsync of the photo library fails about 3 nights in 7; the goal is reliability, not a redesign.
+2. Disk space is ruled out because the target had 1.8 TB free on 2026-09-10; restic was rejected because the existing restore drills are rsync-specific and would need rewriting.
+3. The leading hypothesis is timing: the NAS goes to sleep around 03:00 and the job starts at 03:15, so it may hit a sleeping host. I read "failed" and "hangs" as the same symptom, a run that never completes.
+4. The rsync `--timeout` added last week did not fix it; I take that to mean the hang happens outside what that flag covers, most likely the SSH connect phase rather than transfer inactivity.
+5. Constraints: never run the job manually in daytime (uplink saturation), and the log rotates at 04:00 so failed-night evidence must be read before then. Next step branches on where the hang is: SSH connect points to wake-on-LAN before the job, mid-transfer points to starting earlier.
+
+QUESTIONS:
+- The claim that failures "correlate with the NAS going to sleep around 03:00": what evidence established this (NAS power log, sleep schedule, or timing inference), and did all 3 failed nights match it while the 4 good nights did not?
+- The remedy "move the schedule to 02:30" only helps if NAS sleep is an idle timeout that transfer activity would defer, or if the job finishes within 30 minutes; the document states neither, so I cannot reconstruct why 02:30 is expected to work if the NAS sleeps on a fixed schedule at 03:00.

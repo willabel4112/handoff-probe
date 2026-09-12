@@ -1,0 +1,9 @@
+{
+  "name": "handoff-probe",
+  "description": "Interview your handoff document with a fresh, ignorant agent before you leave — loop until a cold reader finds nothing blocking.",
+  "version": "0.1.0",
+  "author": { "name": "Will C. Abel" },
+  "repository": "https://github.com/willabel4112/handoff-probe",
+  "license": "MIT",
+  "keywords": ["handoff", "session-continuity", "context-engineering", "claude-code", "codex"]
+}

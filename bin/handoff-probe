@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# handoff-probe — interview your handoff document with a fresh, ignorant agent before you leave.
+#
+#   handoff-probe <handoff-file> "<goal of the next session>" [work|knowledge]
+#
+# Run by the agent (or human) that just WROTE the handoff, while it still has the context
+# in its head. It spawns a small, cold `claude -p` that sees ONLY the goal and the document
+# text — no tools, no repo, no memory — and must (1) write its first-action plan, then
+# (2) ask ONLY the questions that BLOCK that plan. You answer, fold the answers back into
+# the document, and run it again. Every round is a FRESH probe (stateless); convergence is
+# "a fresh reader finds nothing blocking": the probe prints NO-BLOCKING-QUESTIONS.
+# Stop after 2 consecutive dry rounds, or ~5 rounds max.
+#
+# Why: a handoff doc's enemy is the curse of knowledge — its writer cannot see which of
+# their assumptions are non-obvious. A naive reader's blocking questions locate exactly
+# (writer's head) minus (document), while the writer is still around to answer.
+#
+# Two interview kinds (pick explicitly; a pure checkpoint needs no probe at all):
+#   work       (default) the successor must ACT   — questions = what blocks first-action.
+#   knowledge  the successor must UNDERSTAND       — questions = what cannot be reconstructed.
+#   A work-shaped probe on a knowledge doc has no stop criterion and rabbit-holes.
+#
+# Caller-side rules (they matter more than the script):
+#   - Answer from the repo / git / notes, never from your own memory of the session.
+#   - A question built on a false premise is answered "false premise" and COUNTS AS DRY:
+#     the probe is rewarded for finding questions and will manufacture blockers if you let it.
+#   - Call it bare: no `timeout …`, no pipes, no `&&` — if your agent runs under a command
+#     allowlist, wrappers turn a pre-approved call back into a permission prompt. The deadline
+#     lives inside this script (PROBE_TIMEOUT) for that reason.
+#
+# The probe runs in its own cwd (PROBE_DIR, default ~/.handoff-probe) so throwaway sessions
+# never show up in your real projects' resume pickers. It is mechanically read-only
+# (--permission-mode plan) AND the prompt forbids tools — the probe must stay behind the veil.
+# Caveat: without PROBE_BARE=1 the probe still sees your user-level CLAUDE.md (see Backends).
+#
+# Backends: default = Claude Code (`claude -p`, JSON output with cost). Any other harness works
+# through PROBE_CMD="<command>" — it receives the prompt as one argument and prints plain text
+# (e.g. PROBE_CMD="codex exec"). The protocol is text-in / text-out; nothing else is Claude-specific.
+# Env: PROBE_PMODE (default plan) · PROBE_MODEL (optional --model) · PROBE_DIR (default ~/.handoff-probe)
+#      PROBE_TIMEOUT (seconds, default 900; 0 disables) · PROBE_BARE=1 (add --bare; needs ANTHROPIC_API_KEY)
+#      PROBE_CMD (alternative backend command, see above)
+# Exit: 2 usage · 5 claude call errored · 6 timed out
+set -euo pipefail
+
+usage() { echo 'usage: handoff-probe <handoff-file> "<goal of the next session>" [work|knowledge]' >&2; exit 2; }
+case "${1:-}" in -h|--help|"") usage ;; esac
+[ $# -eq 2 ] || [ $# -eq 3 ] || usage
+HANDOFF=$1 GOAL=$2 KIND="${3:-work}"
+[ -f "$HANDOFF" ] || { echo "handoff-probe: no such file: $HANDOFF" >&2; exit 2; }
+case "$KIND" in work|knowledge) ;; *) echo "handoff-probe: kind must be work|knowledge (got: $KIND)" >&2; exit 2 ;; esac
+
+PMODE="${PROBE_PMODE:-plan}"
+PROBE_DIR="${PROBE_DIR:-$HOME/.handoff-probe}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-900}"
+mkdir -p "$PROBE_DIR"
+
+CLAUDE_BIN=""
+if [ -z "${PROBE_CMD:-}" ]; then
+  CLAUDE_BIN=$(command -v claude 2>/dev/null \
+    || ls -t "$HOME"/.local/bin/claude "$HOME"/.nvm/versions/node/*/bin/claude 2>/dev/null | head -1)
+  [ -n "$CLAUDE_BIN" ] || { echo "handoff-probe: claude CLI not found (or set PROBE_CMD for another backend)" >&2; exit 5; }
+fi
+MODEL_FLAG=""; [ -n "${PROBE_MODEL:-}" ] && MODEL_FLAG="--model $PROBE_MODEL"
+
+DOC=$(cat "$HANDOFF")
+if [ "$KIND" = "knowledge" ]; then
+TASK="Your task (a knowledge-transfer check — you do not need to act, only to be able to rebuild the understanding):
+1. Under \"SUMMARY:\", restate in at most 5 lines the document's core conclusions/decisions and WHY they hold.
+2. Under \"QUESTIONS:\", list ONLY understanding breakpoints — places where the document asserts X but you cannot reconstruct where X comes from or why it holds, or where a term/reference cannot be resolved. One question per line.
+   - Do not ask action/operational questions (this document has no first-action).
+   - Do not ask nice-to-know or background questions. When unsure whether something is a breakpoint, write the interpretation you are adopting in SUMMARY instead of turning it into a question.
+3. If there are no understanding breakpoints, output exactly one line under \"QUESTIONS:\": NO-BLOCKING-QUESTIONS"
+else
+TASK="Your task:
+1. Under \"PLAN:\", write in 3-5 lines your first-action plan after taking over (start from the document's first-action-on-wake; be concrete down to commands/files).
+2. Under \"QUESTIONS:\", list ONLY the questions that would BLOCK that plan — the kind where not knowing the answer means you cannot proceed or would do it wrong. One per line, most blocking first.
+   - Do not ask what you could derive yourself from the repo, git log, or existing docs after taking over.
+   - Do not ask nice-to-know, background, or timeline questions.
+   - Watch for unstated assumptions: default hosts/ports/paths/versions, \"obvious\" preconditions, conventions only the author knows.
+   - Your value is in finding REAL blockers, not in the number of questions: when unsure whether something truly blocks you, state the default assumption you will adopt in PLAN and move on, instead of turning it into a question.
+3. If there are no blocking questions, output exactly one line under \"QUESTIONS:\": NO-BLOCKING-QUESTIONS"
+fi
+PROMPT="[handoff-probe] You are the successor agent about to take over the work below, behind a veil of ignorance: your ONLY information is the goal and the handoff document below. You have no other memory. Do not use any tools and do not read any files — answer from the text alone.
+
+Goal of the next session:
+$GOAL
+
+Handoff document ($HANDOFF):
+---
+$DOC
+---
+
+$TASK"
+
+# The deadline is enforced HERE, not by the caller: macOS ships no coreutils `timeout`,
+# and wrapping the call site breaks command allowlists (see header).
+OUT=$(mktemp "${TMPDIR:-/tmp}/handoff-probe.XXXXXX")
+trap 'rm -f "$OUT" "$OUT.timeout"' EXIT
+if [ -n "${PROBE_CMD:-}" ]; then
+  # Any other backend: a command that takes the prompt as its single argument and prints the
+  # answer as plain text (e.g. PROBE_CMD="codex exec"). No cost accounting in this path.
+  ( cd "$PROBE_DIR" && $PROBE_CMD "$PROMPT" ) >"$OUT" &
+else
+  # PROBE_BARE=1 adds --bare (skips CLAUDE.md / hooks / skills / plugins / MCP discovery — the
+  # strictest veil). It needs ANTHROPIC_API_KEY: with subscription (OAuth) login, --bare reports
+  # "Not logged in", so it is opt-in. Without it the probe still sees your user-level CLAUDE.md.
+  BARE_FLAG=""; [ "${PROBE_BARE:-0}" = "1" ] && BARE_FLAG="--bare"
+  ( cd "$PROBE_DIR" && "$CLAUDE_BIN" -p $BARE_FLAG --output-format json --permission-mode "$PMODE" $MODEL_FLAG "$PROMPT" ) >"$OUT" &
+fi
+PID=$!
+WD=""
+if [ "${PROBE_TIMEOUT}" -gt 0 ] 2>/dev/null; then
+  ( sleep "$PROBE_TIMEOUT"; kill -TERM "$PID" 2>/dev/null && : >"$OUT.timeout" ) & WD=$!
+fi
+RC=0; wait "$PID" || RC=$?
+if [ -n "$WD" ]; then kill "$WD" 2>/dev/null || true; fi
+if [ -f "$OUT.timeout" ]; then
+  echo "handoff-probe: timed out after ${PROBE_TIMEOUT}s (raise/disable via PROBE_TIMEOUT)" >&2; exit 6
+fi
+RES=$(cat "$OUT")
+[ -n "$RES" ] || { echo "handoff-probe: backend produced no output (exit $RC)" >&2; exit 5; }
+if [ -n "${PROBE_CMD:-}" ]; then
+  printf '%s\n' "$RES"
+  echo "--- handoff-probe: backend=$PROBE_CMD | fresh probe per round; a dry round prints NO-BLOCKING-QUESTIONS" >&2
+  exit 0
+fi
+
+jget() { python3 -c 'import sys,json
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+v=d.get(sys.argv[1],"")
+print(v if v is not None else "")' "$1" 2>/dev/null || true; }
+
+TEXT=$(printf '%s' "$RES" | jget result)
+COST=$(printf '%s' "$RES" | jget total_cost_usd)
+ISERR=$(printf '%s' "$RES" | jget is_error)
+case "$ISERR" in
+  [Tt]rue) echo "handoff-probe: call errored:" >&2; printf '%s\n' "$TEXT" >&2; exit 5 ;;
+esac
+printf '%s\n' "$TEXT"
+echo "--- handoff-probe: cost=\$${COST:-?} | fresh probe per round; a dry round prints NO-BLOCKING-QUESTIONS" >&2
