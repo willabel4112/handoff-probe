@@ -27,6 +27,8 @@ NO-BLOCKING-QUESTIONS
 --- handoff-probe: cost=$0.89 | fresh probe per round; a dry round prints NO-BLOCKING-QUESTIONS
 ```
 
+Longer write-up: [Interview your handoff document before you leave](https://willabel4112.github.io/2026/09/12/interview-your-handoff-before-you-leave.html).
+
 Two full rounds against the toy document in [`examples/`](examples/) are checked in verbatim
 ([work mode](examples/probe-round-1.txt), [knowledge mode](examples/probe-knowledge-round-1.txt)).
 
